@@ -202,6 +202,31 @@ function artifactRevision(bundle: Buffer, sourceMap: WebPluginRecord['sourceMap'
   return framedHash('plugin-artifact', sourceMap === undefined ? [bundle] : [bundle, sourceMap.body])
 }
 
+/** The manifest face a packaged-executable module-fallback proxy carries. */
+interface ModuleFallbackProxyManifest {
+  name?: unknown
+  dsh?: unknown
+}
+
+/** Depth cap on proxy redirects: targets point at real installs, so one hop is the norm. */
+const MAX_PROXY_REDIRECTS = 4
+
+/**
+ * The module URL this packaged-executable fallback proxy re-exports, or
+ * `undefined` for an ordinary manifest. Proxies exist because operating-system
+ * links cannot enter pkg's virtual filesystem; their `dsh.moduleFallback`
+ * targets are the only pointer back to the real package the browser roster
+ * must be scanned from.
+ */
+function moduleFallbackTarget(manifest: ModuleFallbackProxyManifest): string | undefined {
+  if (typeof manifest.dsh !== 'object' || manifest.dsh === null) return undefined
+  const fallback = (manifest.dsh as Record<string, unknown>).moduleFallback
+  if (typeof fallback !== 'object' || fallback === null) return undefined
+  const targets = (fallback as Record<string, unknown>).targets
+  if (typeof targets !== 'object' || targets === null) return undefined
+  return Object.values(targets).find((target): target is string => typeof target === 'string')
+}
+
 /** Address one ordered plugin-file list through the shared combo route. */
 function comboUrl(ids: readonly string[], rev: string, sourceMap = false): string {
   const resources = ids.map(id => `${id}/client.js${sourceMap ? '.map' : ''}`).join(',')
@@ -751,6 +776,11 @@ export class ClientModuleRegistry extends Service {
    * active ESM hooks — and the nearest ancestor manifest declaring the name
    * owns the module. Tree-anchored `require` resolution remains only for
    * runtimes without Node internals.
+   *
+   * A packaged executable mounts rows from on-disk module-fallback proxies
+   * whose manifests carry no `dsh.client`; when the nearest manifest is such a
+   * proxy, the scan follows its target back into the installation and reads
+   * the real package instead.
    * @param loaderName - module specifier of the loader row.
    * @param baseUrl - resolution base of the tree that owns the row.
    * @returns the manifest path, or `undefined` when the name resolves to no package root.
@@ -774,10 +804,20 @@ export class ClientModuleRegistry extends Service {
           packageName: expectedPackageName,
         }
       } catch {
+        // A packaged executable's module-fallback proxy omits the
+        // `./package.json` subpath from its exports table. Resolve the bare
+        // package name instead so the manifest walk below can see the proxy
+        // and follow its target back to the real package.
+      }
+      let resolved: string
+      try {
+        resolved = createRequire(baseUrl).resolve(expectedPackageName)
+      } catch {
         // Without Node internals the owning tree is the only resolver; an
         // unresolvable name is classified exactly as below.
         return undefined
       }
+      return this.nearestPackage(pathToFileURL(resolved).href, expectedPackageName)
     }
     let moduleUrl: string
     try {
@@ -795,6 +835,7 @@ export class ClientModuleRegistry extends Service {
   private nearestPackage(
     moduleUrl: string,
     expectedPackageName?: string,
+    proxyRedirects = 0,
   ): { path: string; packageName: string } | undefined {
     if (!moduleUrl.startsWith('file:')) return undefined
     let dir = dirname(fileURLToPath(moduleUrl))
@@ -802,8 +843,16 @@ export class ClientModuleRegistry extends Service {
       const candidate = join(dir, 'package.json')
       if (existsSync(candidate)) {
         try {
-          const name = (JSON.parse(readFileSync(candidate, 'utf8')) as { name?: unknown }).name
+          const manifest = JSON.parse(readFileSync(candidate, 'utf8')) as ModuleFallbackProxyManifest
+          const name = manifest.name
           if (typeof name === 'string' && (expectedPackageName === undefined || name === expectedPackageName)) {
+            // A packaged executable's fallback proxy re-exports the real
+            // package from inside its virtual filesystem; continue the walk
+            // from the target so the declaring (real) manifest is found.
+            const target = moduleFallbackTarget(manifest)
+            if (target !== undefined && proxyRedirects < MAX_PROXY_REDIRECTS) {
+              return this.nearestPackage(target, expectedPackageName, proxyRedirects + 1)
+            }
             return { path: candidate, packageName: name }
           }
         } catch {

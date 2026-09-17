@@ -57,6 +57,53 @@ function writeBuiltPackage(packageName: string, client: Record<string, unknown>)
   writeFileSync(clientPath, 'module.exports = {}\n')
 }
 
+/**
+ * Lay out one package the way a packaged executable ships it: the real
+ * install inside a simulated virtual filesystem and an on-disk module-fallback
+ * proxy beside the profile tree, whose manifest carries no `dsh.client`. The
+ * returned path is the real client bundle the scan must recover.
+ */
+function writeProxiedPackage(packageName: string): string {
+  root ??= realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-')))
+  const packageRoot = join(root, 'install', 'node_modules', ...packageName.split('/'))
+  const clientPath = join(packageRoot, 'lib', 'client.js')
+  mkdirSync(dirname(clientPath), { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+    name: packageName,
+    version: '0.0.0',
+    exports: {
+      '.': './lib/index.js',
+      './client': './lib/client.js',
+      './package.json': './package.json',
+    },
+    dsh: { client: { platform: 'web' } },
+  }))
+  writeFileSync(join(packageRoot, 'lib', 'index.js'), 'export {}\n')
+  writeFileSync(clientPath, 'module.exports = {}\n')
+  const proxyRoot = join(root, 'profiles', 'node_modules', ...packageName.split('/'))
+  mkdirSync(proxyRoot, { recursive: true })
+  const targetOf = (specifier: string): string => pathToFileURL(
+    specifier === '.'
+      ? join(packageRoot, 'lib', 'index.js')
+      : join(packageRoot, 'lib', `${specifier.slice('./'.length)}.js`),
+  ).href
+  writeFileSync(join(proxyRoot, 'package.json'), JSON.stringify({
+    name: packageName,
+    version: '0.0.0',
+    private: true,
+    type: 'module',
+    exports: { '.': './entry-0.js' },
+    dsh: { moduleFallback: { targets: { '.': targetOf('.'), './client': targetOf('./client') } } },
+  }))
+  writeFileSync(join(proxyRoot, 'entry-0.js'), "import './real.js'\n")
+  return clientPath
+}
+
+/** The profile-tree base URL a packaged executable anchors its Loader at. */
+function profileBaseUrl(): string {
+  return pathToFileURL(join(root!, 'profiles', 'web')).href + '/'
+}
+
 /** Construct the node-half service and capture its plugin-bundle route. */
 function constructWithRoute(
   packageNames: string[],
@@ -260,6 +307,52 @@ describe('client bundle activation', () => {
 
       const { service } = constructWithRoute([packageName], {
         contextBaseUrl,
+        entryBaseUrl,
+        internal: internal as NonNullable<Context['loader']['internal']>,
+      })
+
+      expect(calls).toEqual(version === 'v2'
+        ? [[entryBaseUrl, { specifier: packageName, attributes: {} }]]
+        : [[packageName, entryBaseUrl, {}]])
+      expect(service.clientPath(packageName)).toBe(clientPath)
+      expect(service.graph().entries.map(entry => entry.id)).toEqual([packageName])
+    },
+  )
+
+  it('scans the real package behind a module-fallback proxy without Node loader internals', () => {
+    const packageName = '@fixture/proxied-fallback'
+    const clientPath = writeProxiedPackage(packageName)
+
+    const { service } = constructWithRoute([packageName], {
+      contextBaseUrl: profileBaseUrl(),
+      entryBaseUrl: profileBaseUrl(),
+    })
+
+    expect(service.clientPath(packageName)).toBe(clientPath)
+    const graph = service.graph()
+    expect(graph.entries.map(entry => entry.id)).toEqual([packageName])
+    // The deployed failure mode was an empty graph over a live plugin tree.
+    expect(graph.batches.map(batch => batch.entries)).toEqual([[packageName]])
+  })
+
+  it.each(['v1', 'v2'] as const)(
+    'scans the real package behind a module-fallback proxy through the %s Loader resolver',
+    (version) => {
+      const packageName = `@fixture/proxied-${version}`
+      const clientPath = writeProxiedPackage(packageName)
+      const proxyEntry = join(root!, 'profiles', 'node_modules', ...packageName.split('/'), 'entry-0.js')
+      const entryBaseUrl = profileBaseUrl()
+      const calls: unknown[][] = []
+      const internal = {
+        version,
+        resolveSync: (...args: unknown[]) => {
+          calls.push(args)
+          return { format: 'module' as const, url: pathToFileURL(proxyEntry).href }
+        },
+      }
+
+      const { service } = constructWithRoute([packageName], {
+        contextBaseUrl: entryBaseUrl,
         entryBaseUrl,
         internal: internal as NonNullable<Context['loader']['internal']>,
       })
