@@ -2,12 +2,28 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons } from './build-exe-for-python-sdk-native-pty.ts'
+import { hasLinuxNodePtyPrebuild, resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons } from './build-exe-for-python-sdk-native-pty.ts'
 
 const roots: string[] = []
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+describe('hasLinuxNodePtyPrebuild', () => {
+  it('reports the installed target prebuild', () => {
+    const root = temporaryPackage()
+    createAddon(root, 'prebuilds', 'linux-x64', 'pty.node')
+
+    expect(hasLinuxNodePtyPrebuild(root, 'x64')).toBe(true)
+    expect(hasLinuxNodePtyPrebuild(root, 'arm64')).toBe(false)
+  })
+
+  it('reports absent prebuilds', () => {
+    const root = temporaryPackage()
+
+    expect(hasLinuxNodePtyPrebuild(root, 'x64')).toBe(false)
+  })
 })
 
 describe('resolveLinuxNodePtyAddon', () => {

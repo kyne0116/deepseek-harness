@@ -18,6 +18,13 @@ packages:
 # builds must resolve those matching names to this workspace's pinned sources.
 linkWorkspacePackages: true
 
+# Materialize the linux-x64 optional platform packages (ripgrep sidecar and
+# friends) alongside the host's own, so a non-Linux machine can cross-package
+# the linux-x64 single-exe runtime with `--targets=node24-linux-x64`.
+supportedArchitectures:
+  os: [current, linux]
+  cpu: [current, x64]
+
 overrides:
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
