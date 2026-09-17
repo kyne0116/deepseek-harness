@@ -1,0 +1,237 @@
+From 1755d58703021a473813725491f2acfe5a908e07 Mon Sep 17 00:00:00 2001
+From: Kyne <kyne.li@hotmail.com>
+Date: Thu, 17 Sep 2026 22:20:00 +0800
+Subject: [PATCH] fix(client): scan real packages behind packaged-executable
+ module fallback proxies
+
+The packaged executable materializes its installation closure as on-disk
+ESM proxies under $DSH_HOME/profiles/node_modules (OS links cannot enter
+pkg's VFS). The proxy manifests carry no dsh.client, so the node half's
+scan classified every browser-roster package as "not a client package"
+and composed an empty boot graph; the page failed with "HTML did not
+preload @deepseek-ai/dsh-client-modules/client.js" while the host tree
+loaded fine.
+
+nearestPackage now follows a matched manifest's dsh.moduleFallback
+targets back to the real package root inside the installation, and the
+no-internals resolve path falls back from the ./package.json subpath
+(proxies omit it from their exports table) to the bare package name so
+the walk can see the proxy at all. Regression tests cover the proxy
+layout through the no-internals, v1, and v2 resolver paths.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ packages/client/modules/src/index.ts          | 51 +++++++++-
+ .../modules/tests/node-half.client.spec.ts    | 93 +++++++++++++++++++
+ 2 files changed, 143 insertions(+), 1 deletion(-)
+
+diff --git a/packages/client/modules/src/index.ts b/packages/client/modules/src/index.ts
+index 36ff79941b..78c077b90c 100644
+--- a/packages/client/modules/src/index.ts
++++ b/packages/client/modules/src/index.ts
+@@ -202,6 +202,31 @@ function artifactRevision(bundle: Buffer, sourceMap: WebPluginRecord['sourceMap'
+   return framedHash('plugin-artifact', sourceMap === undefined ? [bundle] : [bundle, sourceMap.body])
+ }
+ 
++/** The manifest face a packaged-executable module-fallback proxy carries. */
++interface ModuleFallbackProxyManifest {
++  name?: unknown
++  dsh?: unknown
++}
++
++/** Depth cap on proxy redirects: targets point at real installs, so one hop is the norm. */
++const MAX_PROXY_REDIRECTS = 4
++
++/**
++ * The module URL this packaged-executable fallback proxy re-exports, or
++ * `undefined` for an ordinary manifest. Proxies exist because operating-system
++ * links cannot enter pkg's virtual filesystem; their `dsh.moduleFallback`
++ * targets are the only pointer back to the real package the browser roster
++ * must be scanned from.
++ */
++function moduleFallbackTarget(manifest: ModuleFallbackProxyManifest): string | undefined {
++  if (typeof manifest.dsh !== 'object' || manifest.dsh === null) return undefined
++  const fallback = (manifest.dsh as Record<string, unknown>).moduleFallback
++  if (typeof fallback !== 'object' || fallback === null) return undefined
++  const targets = (fallback as Record<string, unknown>).targets
++  if (typeof targets !== 'object' || targets === null) return undefined
++  return Object.values(targets).find((target): target is string => typeof target === 'string')
++}
++
+ /** Address one ordered plugin-file list through the shared combo route. */
+ function comboUrl(ids: readonly string[], rev: string, sourceMap = false): string {
+   const resources = ids.map(id => `${id}/client.js${sourceMap ? '.map' : ''}`).join(',')
+@@ -751,6 +776,11 @@ export class ClientModuleRegistry extends Service {
+    * active ESM hooks — and the nearest ancestor manifest declaring the name
+    * owns the module. Tree-anchored `require` resolution remains only for
+    * runtimes without Node internals.
++   *
++   * A packaged executable mounts rows from on-disk module-fallback proxies
++   * whose manifests carry no `dsh.client`; when the nearest manifest is such a
++   * proxy, the scan follows its target back into the installation and reads
++   * the real package instead.
+    * @param loaderName - module specifier of the loader row.
+    * @param baseUrl - resolution base of the tree that owns the row.
+    * @returns the manifest path, or `undefined` when the name resolves to no package root.
+@@ -773,11 +803,21 @@ export class ClientModuleRegistry extends Service {
+           path: createRequire(baseUrl).resolve(`${expectedPackageName}/package.json`),
+           packageName: expectedPackageName,
+         }
++      } catch {
++        // A packaged executable's module-fallback proxy omits the
++        // `./package.json` subpath from its exports table. Resolve the bare
++        // package name instead so the manifest walk below can see the proxy
++        // and follow its target back to the real package.
++      }
++      let resolved: string
++      try {
++        resolved = createRequire(baseUrl).resolve(expectedPackageName)
+       } catch {
+         // Without Node internals the owning tree is the only resolver; an
+         // unresolvable name is classified exactly as below.
+         return undefined
+       }
++      return this.nearestPackage(pathToFileURL(resolved).href, expectedPackageName)
+     }
+     let moduleUrl: string
+     try {
+@@ -795,6 +835,7 @@ export class ClientModuleRegistry extends Service {
+   private nearestPackage(
+     moduleUrl: string,
+     expectedPackageName?: string,
++    proxyRedirects = 0,
+   ): { path: string; packageName: string } | undefined {
+     if (!moduleUrl.startsWith('file:')) return undefined
+     let dir = dirname(fileURLToPath(moduleUrl))
+@@ -802,8 +843,16 @@ export class ClientModuleRegistry extends Service {
+       const candidate = join(dir, 'package.json')
+       if (existsSync(candidate)) {
+         try {
+-          const name = (JSON.parse(readFileSync(candidate, 'utf8')) as { name?: unknown }).name
++          const manifest = JSON.parse(readFileSync(candidate, 'utf8')) as ModuleFallbackProxyManifest
++          const name = manifest.name
+           if (typeof name === 'string' && (expectedPackageName === undefined || name === expectedPackageName)) {
++            // A packaged executable's fallback proxy re-exports the real
++            // package from inside its virtual filesystem; continue the walk
++            // from the target so the declaring (real) manifest is found.
++            const target = moduleFallbackTarget(manifest)
++            if (target !== undefined && proxyRedirects < MAX_PROXY_REDIRECTS) {
++              return this.nearestPackage(target, expectedPackageName, proxyRedirects + 1)
++            }
+             return { path: candidate, packageName: name }
+           }
+         } catch {
+diff --git a/packages/client/modules/tests/node-half.client.spec.ts b/packages/client/modules/tests/node-half.client.spec.ts
+index 4f06360ff6..3c6936df6b 100644
+--- a/packages/client/modules/tests/node-half.client.spec.ts
++++ b/packages/client/modules/tests/node-half.client.spec.ts
+@@ -57,6 +57,53 @@ function writeBuiltPackage(packageName: string, client: Record<string, unknown>)
+   writeFileSync(clientPath, 'module.exports = {}\n')
+ }
+ 
++/**
++ * Lay out one package the way a packaged executable ships it: the real
++ * install inside a simulated virtual filesystem and an on-disk module-fallback
++ * proxy beside the profile tree, whose manifest carries no `dsh.client`. The
++ * returned path is the real client bundle the scan must recover.
++ */
++function writeProxiedPackage(packageName: string): string {
++  root ??= realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-')))
++  const packageRoot = join(root, 'install', 'node_modules', ...packageName.split('/'))
++  const clientPath = join(packageRoot, 'lib', 'client.js')
++  mkdirSync(dirname(clientPath), { recursive: true })
++  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
++    name: packageName,
++    version: '0.0.0',
++    exports: {
++      '.': './lib/index.js',
++      './client': './lib/client.js',
++      './package.json': './package.json',
++    },
++    dsh: { client: { platform: 'web' } },
++  }))
++  writeFileSync(join(packageRoot, 'lib', 'index.js'), 'export {}\n')
++  writeFileSync(clientPath, 'module.exports = {}\n')
++  const proxyRoot = join(root, 'profiles', 'node_modules', ...packageName.split('/'))
++  mkdirSync(proxyRoot, { recursive: true })
++  const targetOf = (specifier: string): string => pathToFileURL(
++    specifier === '.'
++      ? join(packageRoot, 'lib', 'index.js')
++      : join(packageRoot, 'lib', `${specifier.slice('./'.length)}.js`),
++  ).href
++  writeFileSync(join(proxyRoot, 'package.json'), JSON.stringify({
++    name: packageName,
++    version: '0.0.0',
++    private: true,
++    type: 'module',
++    exports: { '.': './entry-0.js' },
++    dsh: { moduleFallback: { targets: { '.': targetOf('.'), './client': targetOf('./client') } } },
++  }))
++  writeFileSync(join(proxyRoot, 'entry-0.js'), "import './real.js'\n")
++  return clientPath
++}
++
++/** The profile-tree base URL a packaged executable anchors its Loader at. */
++function profileBaseUrl(): string {
++  return pathToFileURL(join(root!, 'profiles', 'web')).href + '/'
++}
++
+ /** Construct the node-half service and capture its plugin-bundle route. */
+ function constructWithRoute(
+   packageNames: string[],
+@@ -272,6 +319,52 @@ describe('client bundle activation', () => {
+     },
+   )
+ 
++  it('scans the real package behind a module-fallback proxy without Node loader internals', () => {
++    const packageName = '@fixture/proxied-fallback'
++    const clientPath = writeProxiedPackage(packageName)
++
++    const { service } = constructWithRoute([packageName], {
++      contextBaseUrl: profileBaseUrl(),
++      entryBaseUrl: profileBaseUrl(),
++    })
++
++    expect(service.clientPath(packageName)).toBe(clientPath)
++    const graph = service.graph()
++    expect(graph.entries.map(entry => entry.id)).toEqual([packageName])
++    // The deployed failure mode was an empty graph over a live plugin tree.
++    expect(graph.batches.map(batch => batch.entries)).toEqual([[packageName]])
++  })
++
++  it.each(['v1', 'v2'] as const)(
++    'scans the real package behind a module-fallback proxy through the %s Loader resolver',
++    (version) => {
++      const packageName = `@fixture/proxied-${version}`
++      const clientPath = writeProxiedPackage(packageName)
++      const proxyEntry = join(root!, 'profiles', 'node_modules', ...packageName.split('/'), 'entry-0.js')
++      const entryBaseUrl = profileBaseUrl()
++      const calls: unknown[][] = []
++      const internal = {
++        version,
++        resolveSync: (...args: unknown[]) => {
++          calls.push(args)
++          return { format: 'module' as const, url: pathToFileURL(proxyEntry).href }
++        },
++      }
++
++      const { service } = constructWithRoute([packageName], {
++        contextBaseUrl: entryBaseUrl,
++        entryBaseUrl,
++        internal: internal as NonNullable<Context['loader']['internal']>,
++      })
++
++      expect(calls).toEqual(version === 'v2'
++        ? [[entryBaseUrl, { specifier: packageName, attributes: {} }]]
++        : [[packageName, entryBaseUrl, {}]])
++      expect(service.clientPath(packageName)).toBe(clientPath)
++      expect(service.graph().entries.map(entry => entry.id)).toEqual([packageName])
++    },
++  )
++
+   it('derives the browser module id from a file entry owning manifest', () => {
+     const packageName = '@fixture/file-entry'
+     const clientPath = writePackage(packageName)
+-- 
+2.55.0.windows.5
+

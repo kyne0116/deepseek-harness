@@ -1,0 +1,86 @@
+================================================================
+ nginx 1.30.5 + nginx_upstream_check_module 安装手册（DSH 服务器版）
+ 适用机器：10.218.180.45 / host-192-168-40-99（test03 实例宿主机）
+ 安装位置：/data（源码 /data/nginx-1.30.5，编译产物 /data/nginx8088）
+ 适用系统：CentOS / RHEL / BCEuler-21.10
+================================================================
+
+一、环境依赖
+----------------------------------------------------------------
+进入程序帐号，执行以下指令获取root的sudo权限
+sudo -i
+密码：5tgb*UHB
+yum groupinstall -y "Development Tools"
+yum install -y gcc make patch unzip pcre-devel zlib-devel openssl-devel
+
+二、编译安装
+----------------------------------------------------------------
+# 1. 将 nginx-1.30.5.tar.gz 与 nginx_upstream_check_module-master.zip
+#    上传到服务器同一目录（示例 /data），解压：
+cd /data/nginx-1.30.5
+tar -xzf nginx-1.30.5.tar.gz
+unzip nginx_upstream_check_module-master.zip
+cd nginx-1.30.5
+
+# 2. 打健康检查补丁（使用 check_1.30.4+.patch）
+patch -p1 < ../nginx_upstream_check_module-master/check_1.30.4+.patch
+
+# 3. 编译配置（追加其他第三方模块时再加对应 --add-module）
+# 注意：保持单行执行，勿拆成多行（\ 续行符后混入空格会报 invalid option " "）
+./configure --prefix=/data/nginx8088 --with-http_ssl_module --with-http_stub_status_module --with-http_gzip_static_module --add-module=../nginx_upstream_check_module-master
+
+# 4. 编译安装
+# configure 报 "SSL modules require the OpenSSL library" 即缺 openssl-devel，
+# 先按"一、环境依赖"补装（只需补缺的包），再 make clean 后重新 configure
+make -j$(nproc) && make install
+
+# 5. 创建运行目录（make install 不创建；run/ 存放 pid 文件，conf/vhosts/ 存放业务配置）
+mkdir -p /data/nginx8088/run /data/nginx8088/conf/vhosts
+
+# 6. 验证（输出应包含 nginx/1.30.5 及 --add-module 信息）
+/data/nginx8088/sbin/nginx -V
+
+三、配置文件布局
+----------------------------------------------------------------
+# /data/nginx8088/conf/nginx.conf（详见nginx.conf文件） ==================
+
+# /data/nginx8088/conf/vhosts/simbest.conf（详见simbest.conf文件） ==================
+# DSH 机角色：按 Host 把 *.dsh.internal 分发到回环 DSH 实例
+# （test03.dsh.internal → 127.0.0.1:7103，加实例在 map 加行）
+
+四、systemd 服务
+----------------------------------------------------------------
+创建 /etc/systemd/system/nginx.service：
+
+[Unit]
+Description=nginx - high performance web server
+After=network.target
+
+[Service]
+Type=forking
+# nginx 装在 /data 下、仅监听 8088 非特权端口，以 mapp 普通账号运行
+# 前提：/data/nginx8088 全目录归 mapp 所有
+User=mapp
+Group=mapp
+PIDFile=/data/nginx8088/run/nginx.pid
+ExecStartPre=/data/nginx8088/sbin/nginx -t -c /data/nginx8088/conf/nginx.conf
+ExecStart=/data/nginx8088/sbin/nginx -c /data/nginx8088/conf/nginx.conf
+ExecReload=/data/nginx8088/sbin/nginx -c /data/nginx8088/conf/nginx.conf -s reload
+ExecStop=/data/nginx8088/sbin/nginx -c /data/nginx8088/conf/nginx.conf -s quit
+Restart=on-failure
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
+启用并设为开机自启：
+systemctl daemon-reload
+systemctl enable --now nginx
+
+五、常用运维命令
+----------------------------------------------------------------
+启动       /data/nginx8088/sbin/nginx
+检测配置   /data/nginx8088/sbin/nginx -t
+重新加载   /data/nginx8088/sbin/nginx -s reload
+优雅停止   /data/nginx8088/sbin/nginx -s quit
+快速停止   /data/nginx8088/sbin/nginx -s stop

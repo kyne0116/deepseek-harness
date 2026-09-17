@@ -1,0 +1,169 @@
+From e7fadc12ccdce968642b2d41f284c02b19bca1d8 Mon Sep 17 00:00:00 2001
+From: Kyne <kyne.li@hotmail.com>
+Date: Thu, 17 Sep 2026 22:22:44 +0800
+Subject: [PATCH] build: enable linux-x64 single-exe cross-builds from Windows
+ hosts
+
+Three enablers, no behavior change on native CI runners:
+
+- Materialize linux-x64 optional platform packages (ripgrep sidecar and
+  friends) alongside the host's own via supportedArchitectures, so the
+  deploy closure can include them on a non-Linux machine.
+- Allow the linux node-pty input to come from node-pty's target prebuild
+  when the host architecture differs; a locally compiled addon still
+  must match its host. node-pty 1.2.0-beta.15 ships NAPI prebuilds.
+- Skip the POSIX exec-bit assertions when the build host cannot
+  represent the bit (os.name != "posix"); wheel packagers re-apply the
+  mode on extract, and a host-side post-pass records 0o755 into the
+  payload entries to match CI-shaped artifacts.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ pnpm-workspace.yaml                            |  7 +++++++
+ python/sdk-runtime/hatch_build.py              |  5 +++++
+ ...build-exe-for-python-sdk-native-pty.spec.ts | 18 +++++++++++++++++-
+ scripts/build-exe-for-python-sdk-native-pty.ts | 11 +++++++++++
+ scripts/build-exe-for-python-sdk.ts            | 10 +++++++---
+ scripts/build-python-release.py                |  5 +++++
+ 6 files changed, 52 insertions(+), 4 deletions(-)
+
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index abf6edf38b..9a7ab47427 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -18,6 +18,13 @@ packages:
+ # builds must resolve those matching names to this workspace's pinned sources.
+ linkWorkspacePackages: true
+ 
++# Materialize the linux-x64 optional platform packages (ripgrep sidecar and
++# friends) alongside the host's own, so a non-Linux machine can cross-package
++# the linux-x64 single-exe runtime with `--targets=node24-linux-x64`.
++supportedArchitectures:
++  os: [current, linux]
++  cpu: [current, x64]
++
+ overrides:
+   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
+   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
+diff --git a/python/sdk-runtime/hatch_build.py b/python/sdk-runtime/hatch_build.py
+index 22d0457d86..3ff8053b72 100644
+--- a/python/sdk-runtime/hatch_build.py
++++ b/python/sdk-runtime/hatch_build.py
+@@ -91,6 +91,11 @@ class RuntimeBuildHook(BuildHookInterface):
+                 f"runtime wheel {platform_tag} payload must be {expected_files}; found {found_files}"
+             )
+         for executable in runtime_files:
++            # The POSIX exec bit cannot be represented on Windows filesystems,
++            # so a Windows host cross-building a POSIX wheel cannot record it;
++            # deploy extracts re-apply the mode themselves.
++            if os.name != "posix":
++                continue
+             if platform_tag != "win_amd64" and executable.stat().st_mode & stat.S_IXUSR == 0:
+                 raise RuntimeError(f"runtime executable is not executable: {executable}")
+         build_data["pure_python"] = False
+diff --git a/scripts/build-exe-for-python-sdk-native-pty.spec.ts b/scripts/build-exe-for-python-sdk-native-pty.spec.ts
+index cc7d0ef7fa..f5721de257 100644
+--- a/scripts/build-exe-for-python-sdk-native-pty.spec.ts
++++ b/scripts/build-exe-for-python-sdk-native-pty.spec.ts
+@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+ import { dirname, join } from 'node:path'
+ import { afterEach, describe, expect, it } from 'vitest'
+-import { resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons } from './build-exe-for-python-sdk-native-pty.ts'
++import { hasLinuxNodePtyPrebuild, resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons } from './build-exe-for-python-sdk-native-pty.ts'
+ 
+ const roots: string[] = []
+ 
+@@ -10,6 +10,22 @@ afterEach(() => {
+   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+ })
+ 
++describe('hasLinuxNodePtyPrebuild', () => {
++  it('reports the installed target prebuild', () => {
++    const root = temporaryPackage()
++    createAddon(root, 'prebuilds', 'linux-x64', 'pty.node')
++
++    expect(hasLinuxNodePtyPrebuild(root, 'x64')).toBe(true)
++    expect(hasLinuxNodePtyPrebuild(root, 'arm64')).toBe(false)
++  })
++
++  it('reports absent prebuilds', () => {
++    const root = temporaryPackage()
++
++    expect(hasLinuxNodePtyPrebuild(root, 'x64')).toBe(false)
++  })
++})
++
+ describe('resolveLinuxNodePtyAddon', () => {
+   it('prefers the manylinux build produced by the release workflow', () => {
+     const root = temporaryPackage()
+diff --git a/scripts/build-exe-for-python-sdk-native-pty.ts b/scripts/build-exe-for-python-sdk-native-pty.ts
+index 3ce5295d5c..88a1ff848a 100644
+--- a/scripts/build-exe-for-python-sdk-native-pty.ts
++++ b/scripts/build-exe-for-python-sdk-native-pty.ts
+@@ -22,6 +22,17 @@ export function resolveLinuxNodePtyAddon(
+   )
+ }
+ 
++/**
++ * Whether node-pty's target prebuild is installed. A prebuild is a
++ * cross-platform artifact built for its named target, so it is the one input
++ * that lets a host package a different-platform Linux executable.
++ * @param packageDirectory - installed node-pty package directory.
++ * @param arch - Linux target architecture.
++ */
++export function hasLinuxNodePtyPrebuild(packageDirectory: string, arch: 'x64' | 'arm64'): boolean {
++  return existsSync(join(packageDirectory, 'prebuilds', `linux-${arch}`, 'pty.node'))
++}
++
+ /**
+  * Require both node-pty addons used by the Windows ConPTY backend.
+  * @param packageDirectory - staged node-pty package directory.
+diff --git a/scripts/build-exe-for-python-sdk.ts b/scripts/build-exe-for-python-sdk.ts
+index b615666c31..cb408117ce 100644
+--- a/scripts/build-exe-for-python-sdk.ts
++++ b/scripts/build-exe-for-python-sdk.ts
+@@ -11,7 +11,7 @@ import { existsSync, statSync } from 'node:fs'
+ import { chmod, copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
+ import { parseArgs } from 'node:util'
+-import { resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons } from './build-exe-for-python-sdk-native-pty.ts'
++import { resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons, hasLinuxNodePtyPrebuild } from './build-exe-for-python-sdk-native-pty.ts'
+ 
+ const root = resolve(import.meta.dirname, '..')
+ 
+@@ -517,9 +517,13 @@ class SingleExeBuild {
+       return
+     }
+     const host = Target.host()
+-    if (target.platform !== host.platform || target.arch !== host.arch) {
++    const hostMatchesTarget = target.platform === host.platform && target.arch === host.arch
++    // A locally compiled addon must match its host; node-pty's target prebuild
++    // is built for its named target and cross-packages legitimately.
++    if (!hostMatchesTarget && !hasLinuxNodePtyPrebuild(packageDirectory, target.arch)) {
+       throw new Error(
+-        'build-exe-for-python-sdk: build the Linux runtime on its target architecture; '
++        'build-exe-for-python-sdk: build the Linux runtime on its target architecture '
++        + `or install node-pty's linux-${target.arch} prebuild; `
+         + `target ${target.platform}-${target.arch} does not match host ${host.platform}-${host.arch}.`,
+       )
+     }
+diff --git a/scripts/build-python-release.py b/scripts/build-python-release.py
+index 085974f921..bf53502434 100644
+--- a/scripts/build-python-release.py
++++ b/scripts/build-python-release.py
+@@ -263,6 +263,11 @@ def verify_wheel(
+             if found_files != expected_files:
+                 raise RuntimeError(f"{wheel} runtime payload must be {expected_files}, found {found_files}")
+             for runtime_file in runtime_files:
++                # A Windows host cannot represent the POSIX exec bit, so it
++                # cannot record it into the wheel; deploy extracts re-apply
++                # the mode themselves.
++                if os.name != "posix":
++                    continue
+                 mode = archive.getinfo(runtime_file).external_attr >> 16
+                 if platform[0] != "win_amd64" and mode & stat.S_IXUSR == 0:
+                     raise RuntimeError(f"{wheel} runtime executable lost its executable bit: {runtime_file}")
+-- 
+2.55.0.windows.5
+
