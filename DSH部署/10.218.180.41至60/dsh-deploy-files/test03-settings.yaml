@@ -1,0 +1,21 @@
+# /data/dsh/dsh-data/test03/settings.yaml
+# DSH test03 实例 LLM 接入成稿：内网 MoMA 网关（OpenAI 兼容，Qwen3.8-27B）
+# 落位：$DSH_HOME（= /data/dsh/dsh-data/test03）下 settings.yaml，热加载，改完即生效
+# 依赖：test03.env 中 MOMA_API_KEY=<网关 Bearer key>（凭据经 env 注入）
+# 上传前若服务器已存在 settings.yaml，先备份并合并，勿直接覆盖
+
+llm-pi-ai:
+  providers:
+    moma:
+      displayName: MoMA Gateway
+      apiKeyEnv: MOMA_API_KEY
+      api: openai-completions
+      baseURL: http://10.218.174.161:30012/moma/v1
+      models:
+        - id: Qwen3.8-27B
+          name: Qwen3.8 27B
+          contextWindow: 32768   # 占位：向平台组确认网关实际 max_model_len 后修正
+
+agent-default-model:
+  provider: moma
+  model: Qwen3.8-27B

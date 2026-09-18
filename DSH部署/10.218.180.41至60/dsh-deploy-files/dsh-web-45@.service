@@ -1,0 +1,26 @@
+# /data/dsh/.config/systemd/user/dsh-web-45@.service
+# mapp 用户级 systemd 模板单元：45 = 机号标识，%i = 实例名（用户帐号，如 test03）
+# 前置：第 2 节的 enable-linger 与 XDG_CONFIG_HOME 重定向
+# 拉起实例：systemctl --user enable --now dsh-web-45@test03
+# 一份模板管本机全部实例，unit 本体无需随实例增减
+
+[Unit]
+Description=DSH Web Instance %i on node45 (user mode)
+After=network-online.target
+
+[Service]
+EnvironmentFile=/data/dsh/dsh-etc/instances/%i.env
+Environment=DSH_HOME=/data/dsh/dsh-data/%i
+Environment=PYTHONPATH=/data/dsh/dshruntime
+WorkingDirectory=/data/dsh/dsh-work/%i
+ExecStart=/usr/bin/python3 -c 'from deepseek_harness_runtime import main; main()' web --port ${DSH_PORT} --trusted-host ${DSH_AUTHORITY}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+# 日志落盘 /data/dsh/dsh-logs/，每实例一份 dsh-web-45-<实例名>.log
+StandardOutput=append:/data/dsh/dsh-logs/dsh-web-45-%i.log
+StandardError=append:/data/dsh/dsh-logs/dsh-web-45-%i.log
+
+[Install]
+WantedBy=default.target

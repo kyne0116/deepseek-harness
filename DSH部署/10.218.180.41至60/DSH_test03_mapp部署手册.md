@@ -1,10 +1,10 @@
-# DSH 0.1.5-rc.1 部署手册（test03 实例 · mapp 版）
+# DSH 0.1.5-rc.2 部署手册（test03 实例 · mapp 版）
 
 > 适用机器：10.218.180.45 / host-192-168-40-99（test03 实例宿主机）
 > 安装位置：/data/dsh（runtime `/data/dsh/dshruntime`，实例数据 `/data/dsh/dsh-data/test03`）
 > 运行账号：mapp（程序帐号，`sudo -i` 获取 root，与两份 nginx 安装手册一致）
 > 前置组件：nginx 1.30.5（`/data/nginx8088`，已按《nginx 1.30.5 + nginx_upstream_check_module 安装手册·DSH 服务器版》完成安装）、python3
-> 配套材料：本目录 `dsh-deploy-files/`（`test03.env`、`dsh-web-test03.service` 成稿）；nginx 侧成稿 `nginx-1.30.5/DSH配置/simbest.conf`
+> 配套材料：本目录 `dsh-deploy-files/`（`test03.env`、`dsh-web-45@.service` 模板（实例 `dsh-web-45@test03`）、`test03-settings.yaml` 成稿）；nginx 侧成稿 `nginx-1.30.5/DSH配置/simbest.conf`
 
 ---
 
@@ -31,7 +31,7 @@
 ├── dsh-etc/instances/     # 实例参数 env
 ├── dsh-data/test03/       # 用户数据（会话、凭据、设置，即 DSH_HOME）
 ├── dsh-work/test03/       # 工作区与产出文件
-├── dsh-logs/              # 服务日志（dsh-web-test03.log）
+├── dsh-logs/              # 服务日志（每实例一份，如 dsh-web-45-test03.log）
 ├── bin/                   # 启停/辅助脚本
 ├── .config/systemd/user/  # 用户级 systemd 单元（XDG_CONFIG_HOME 重定向至此，见第 2 节）
 └── pkg/                   # 安装包暂存（装完可清）
@@ -61,10 +61,11 @@
 
 | 材料 | 位置 |
 |---|---|
-| `deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_x86_64.whl` | 上传至 `/data/dsh/pkg/` |
+| `deepseek_harness_runtime_bin-0.1.5rc2-py3-none-manylinux_2_28_x86_64.whl` | 上传至 `/data/dsh/pkg/` |
 | nginx 1.30.5（`/data/nginx8088`） | 已安装、已运行（systemd 服务 `nginx`） |
 | vhost 成稿 `simbest.conf`（DSH 机版） | `nginx-1.30.5/DSH配置/simbest.conf` → 第 5 节部署到 `/data/nginx8088/conf/vhosts/` |
-| `test03.env`、`dsh-web-test03.service` 成稿 | 本目录 `dsh-deploy-files/`，与第 4、6 节内容一致 |
+| `test03.env` 实例参数、`dsh-web-45@.service` 模板成稿 | 本目录 `dsh-deploy-files/`，与第 4、6 节内容一致；test03 服务名为 `dsh-web-45@test03` |
+| LLM 接入成稿 `test03-settings.yaml`（MoMA 内网网关，Qwen3.8-27B） | 本目录 `dsh-deploy-files/` → 部署到 `/data/dsh/dsh-data/test03/settings.yaml`，热加载 |
 
 ---
 
@@ -78,10 +79,7 @@ sudo -i
 ```
 
 ```bash
-# 1) 退役旧版 DSH 部署（系统级服务占用 7103 会导致新服务无法启动；
-#    新装机器此步输出 not loaded 属正常）
-systemctl disable --now dsh-web@test03.service 2>/dev/null
-systemctl daemon-reload
+# 1) 预检：确认 7103 未被占用（被占用会导致实例无法启动）
 ss -lntp | grep 7103 || echo "7103 已释放"
 
 # 2) 创建 DSH 根目录并交给 mapp（用 python 改属主，规避安全策略对 chown 的拦截）
@@ -123,20 +121,24 @@ systemctl --user show-environment | grep XDG_CONFIG_HOME
 
 ## 3. 安装 DSH runtime（mapp 用户执行）
 
+> 重装/升级 runtime 时：先 `systemctl --user stop` 停掉本机全部运行中的 DSH 实例再解压——
+> 覆盖正在执行的 runtime 二进制会报 `Text file busy`；解压中途失败会留下新旧混杂的目录，
+> 排除占用后必须从头完整重解压，不可续传。
+
 ```bash
 # 1) 目录准备
 mkdir -p /data/dsh/{dshruntime,dsh-etc/instances,dsh-data/test03,dsh-work/test03,dsh-logs,bin,pkg}
 
 # 2) 解压 wheel（安装包已上传到 /data/dsh/pkg/）
 python3 -m zipfile -e \
-  /data/dsh/pkg/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_x86_64.whl \
+  /data/dsh/pkg/deepseek_harness_runtime_bin-0.1.5rc2-py3-none-manylinux_2_28_x86_64.whl \
   /data/dsh/dshruntime/
 
 # 3) 修正可执行权限（用 python 改，规避安全策略对 chmod 的拦截；
 #    按 wheel 内记录的权限位恢复，再对 runtime/ 目录整体 0o755）
 python3 - <<'PY'
 import os, zipfile
-whl  = "/data/dsh/pkg/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_x86_64.whl"
+whl  = "/data/dsh/pkg/deepseek_harness_runtime_bin-0.1.5rc2-py3-none-manylinux_2_28_x86_64.whl"
 base = "/data/dsh/dshruntime"
 with zipfile.ZipFile(whl) as z:
     for info in z.infolist():
@@ -154,7 +156,7 @@ PY
 # 4) 验证 runtime（DSH_HOME 为 runtime 入口的强制要求，必须显式传入）
 DSH_HOME=/data/dsh/dsh-data/test03 PYTHONPATH=/data/dsh/dshruntime \
   python3 -c 'from deepseek_harness_runtime import main; main()' --version
-# 预期：打印 0.1.5-rc.1 且退出码为 0
+# 预期：打印 0.1.5-rc.2 且退出码为 0
 ```
 
 ---
@@ -185,9 +187,11 @@ DSH_AUTHORITY=test03.dsh.internal
 DSH_HOME=/data/dsh/dsh-data/test03
 
 # ===== LLM 配置（按需补齐，以下为占位示例）=====
-# DEEPSEEK_API_BASE=https://...
 # DEEPSEEK_API_KEY=...
-# DEEPSEEK_MODEL=...
+# DEEPSEEK_BASE_URL=https://...   # 默认公网 https://api.deepseek.com（内网不可达），改接内网网关时必填
+
+# ===== MoMA 内网网关（OpenAI 兼容，Qwen3.8-27B；settings.yaml 引用此 key）=====
+MOMA_API_KEY=<替换为网关 Bearer key>   # 内网凭据，注意保管
 ```
 
 ---
@@ -233,46 +237,50 @@ systemctl reload nginx
 
 ---
 
-## 6. 用户级 systemd 服务（mapp）
+## 6. 用户级 systemd 模板服务（mapp）
 
-DSH test03 的用户级 systemd 服务单元，mapp 用它启停、自愈 DSH 进程。
-unit 本体落 `/data/dsh/.config/systemd/user/`（第 2 节已重定向 `XDG_CONFIG_HOME`），
-unit 内容同样指向 /data/dsh——unit 本体与数据全部在 /data 数据盘。
+DSH 各实例共用**一份模板单元** `dsh-web-45@.service`（45 = 机号标识），`%i` 为实例名
+（用户帐号，如 test03）。模板管本机全部实例，unit 本体不随实例增减；
+mapp 用它启停、自愈 DSH 进程。unit 本体落 `/data/dsh/.config/systemd/user/`
+（第 2 节已重定向 `XDG_CONFIG_HOME`），unit 内容同样指向 /data/dsh——unit 本体与数据全部在 /data 数据盘。
 
-**落位方式**（二选一，最终路径必须是 `/data/dsh/.config/systemd/user/dsh-web-test03.service`）：
+**落位方式**（二选一，最终路径必须是 `/data/dsh/.config/systemd/user/dsh-web-45@.service`）：
 
 ```bash
-# 方式 A：服务器上直接创建（粘贴下方 unit 全文）
+# 方式 A：服务器上直接创建（粘贴下方模板全文）
 mkdir -p /data/dsh/.config/systemd/user
-vi /data/dsh/.config/systemd/user/dsh-web-test03.service
+vi /data/dsh/.config/systemd/user/dsh-web-45@.service
 
-# 方式 B：上传成稿 dsh-deploy-files/dsh-web-test03.service
-# scp dsh-deploy-files/dsh-web-test03.service mapp@10.218.180.45:/data/dsh/.config/systemd/user/dsh-web-test03.service
+# 方式 B：上传模板成稿 dsh-deploy-files/dsh-web-45@.service
+# scp dsh-deploy-files/dsh-web-45@.service mapp@10.218.180.45:/data/dsh/.config/systemd/user/dsh-web-45@.service
 ```
 
-unit 全文（成稿 `dsh-deploy-files/dsh-web-test03.service` 与此一致）：
+模板全文（成稿 `dsh-deploy-files/dsh-web-45@.service` 与此一致）：
 
 ```ini
-# /data/dsh/.config/systemd/user/dsh-web-test03.service
-# mapp 用户级 systemd 单元（前置：第 2 节的 enable-linger 与 XDG_CONFIG_HOME 重定向）
+# /data/dsh/.config/systemd/user/dsh-web-45@.service
+# mapp 用户级 systemd 模板单元：45 = 机号标识，%i = 实例名（用户帐号，如 test03）
+# 前置：第 2 节的 enable-linger 与 XDG_CONFIG_HOME 重定向
+# 拉起实例：systemctl --user enable --now dsh-web-45@test03
+# 一份模板管本机全部实例，unit 本体无需随实例增减
 
 [Unit]
-Description=DSH Web Instance test03 (user mode)
+Description=DSH Web Instance %i on node45 (user mode)
 After=network-online.target
 
 [Service]
-EnvironmentFile=/data/dsh/dsh-etc/instances/test03.env
-Environment=DSH_HOME=/data/dsh/dsh-data/test03
+EnvironmentFile=/data/dsh/dsh-etc/instances/%i.env
+Environment=DSH_HOME=/data/dsh/dsh-data/%i
 Environment=PYTHONPATH=/data/dsh/dshruntime
-WorkingDirectory=/data/dsh/dsh-work/test03
+WorkingDirectory=/data/dsh/dsh-work/%i
 ExecStart=/usr/bin/python3 -c 'from deepseek_harness_runtime import main; main()' web --port ${DSH_PORT} --trusted-host ${DSH_AUTHORITY}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
-# 日志落盘 /data/dsh/dsh-logs/，日常 tail 该文件查看
-StandardOutput=append:/data/dsh/dsh-logs/dsh-web-test03.log
-StandardError=append:/data/dsh/dsh-logs/dsh-web-test03.log
+# 日志落盘 /data/dsh/dsh-logs/，每实例一份 dsh-web-45-<实例名>.log
+StandardOutput=append:/data/dsh/dsh-logs/dsh-web-45-%i.log
+StandardError=append:/data/dsh/dsh-logs/dsh-web-45-%i.log
 
 [Install]
 WantedBy=default.target
@@ -283,7 +291,7 @@ WantedBy=default.target
 ```bash
 systemctl --user daemon-reload
 systemctl --user show-environment | grep XDG_CONFIG_HOME   # 预期：XDG_CONFIG_HOME=/data/dsh/.config
-systemctl --user list-unit-files | grep dsh                # 预期：dsh-web-test03.service
+systemctl --user list-unit-files | grep dsh-web-45         # 预期：dsh-web-45@.service 及 dsh-web-45@test03.service
 ```
 
 ---
@@ -295,15 +303,15 @@ systemctl --user list-unit-files | grep dsh                # 预期：dsh-web-te
 nginx 为常驻服务，第 5.2 节 reload 后路由即已生效，与 DSH 无启动顺序依赖：
 
 ```bash
-systemctl --user enable --now dsh-web-test03.service
-systemctl --user status dsh-web-test03
+systemctl --user enable --now dsh-web-45@test03
+systemctl --user status dsh-web-45@test03
 # 预期：Active: active (running)
 ```
 
 ### 7.2 验收一：DSH 机本机（mapp 执行）
 
 ```bash
-# 1) 端口（8088=nginx；127.0.0.1:7103=python/dsh，仅回环）
+# 1) 端口（8088=nginx；127.0.0.1:7103=DSH，仅回环；DSH 进程名可能显示为 MainThread）
 ss -lntp | grep -E ':(8088|7103)\b'
 
 # 2) 两连 curl（预期 401 / 404）
@@ -311,10 +319,18 @@ curl -sS -D- -o /dev/null -H "Host: test03.dsh.internal" http://127.0.0.1:8088/ 
 curl -sS -D- -o /dev/null -H "Host: nosuch.dsh.internal" http://127.0.0.1:8088/ | head -1
 
 # 3) token（服务日志已落盘）
-grep -o 'token=[A-Za-z0-9_-]*' /data/dsh/dsh-logs/dsh-web-test03.log | tail -1
+grep -o 'token=[A-Za-z0-9_-]*' /data/dsh/dsh-logs/dsh-web-45-test03.log | tail -1
+
+# 4) 页面预载验收（带登录态拉取首页，确认 bootstrap 批次已预载）
+TOKEN=$(grep -o 'token=[A-Za-z0-9_-]*' /data/dsh/dsh-logs/dsh-web-45-test03.log | tail -1 | cut -d= -f2)
+curl -s -c /tmp/dsh-jar -H "Host: test03.dsh.internal" \
+  "http://127.0.0.1:8088/?token=$TOKEN" -o /dev/null
+curl -s -b /tmp/dsh-jar -H "Host: test03.dsh.internal" http://127.0.0.1:8088/ \
+  | grep -o 'plugins/??@deepseek-ai/dsh-client-modules/client.js' | head -1
 ```
 
-判定标准：**401 = nginx→DSH 全链路通，鉴权正常拦截；404 = map 未命中，路由正常。**
+判定标准：**401 = nginx→DSH 全链路通，鉴权正常拦截；404 = map 未命中，路由正常；
+第 4 步命中 `plugins/??@deepseek-ai/dsh-client-modules/client.js` = Web 前端 bootstrap 批次预载正常。**
 
 ### 7.3 验收二：经跳板机 VIP 全链路（10.218.174.159 / .160 两台 + VIP .161）
 
@@ -352,19 +368,19 @@ curl.exe -s -H "Host: test03.dsh.internal" http://10.218.174.161:8088/ngStatus
 
 | 操作 | 命令 |
 |---|---|
-| 看服务状态 | `systemctl --user status dsh-web-test03` |
-| 重启 DSH | `systemctl --user restart dsh-web-test03` |
-| 看 DSH 日志 | `tail -f /data/dsh/dsh-logs/dsh-web-test03.log` |
-| 抓 token 发用户 | `grep -o 'token=[A-Za-z0-9_-]*' /data/dsh/dsh-logs/dsh-web-test03.log \| tail -1` |
+| 看服务状态 | `systemctl --user status dsh-web-45@test03` |
+| 重启 DSH | `systemctl --user restart dsh-web-45@test03` |
+| 看 DSH 日志 | `tail -f /data/dsh/dsh-logs/dsh-web-45-test03.log` |
+| 抓 token 发用户 | `grep -o 'token=[A-Za-z0-9_-]*' /data/dsh/dsh-logs/dsh-web-45-test03.log \| tail -1` |
 | 看访问/错误日志 | `tail -f /data/nginx8088/logs/access.log /data/nginx8088/logs/error.log` |
 | reload nginx | `systemctl reload nginx` |
-| 改 unit / env 后生效 | `systemctl --user daemon-reload && systemctl --user restart dsh-web-test03` |
+| 改 unit / env 后生效 | `systemctl --user daemon-reload && systemctl --user restart dsh-web-45@test03` |
 
 用户访问地址：`http://test03.dsh.internal:8088/?token=<抓到的token>`
 （用户机 hosts 将 `test03.dsh.internal` 指向 **10.218.174.161**，经 VIP 统一入口转发；
 token 为该实例的访问凭据，服务重启后以日志中最新打印为准）
 
-**加用户实例**：复制 env + 新 user unit（换端口/域名）+ vhost 成稿 `simbest.conf` 的 `map $host` 加一行 + `systemctl reload nginx`。
+**加用户实例**：按名单表生成 env（`/data/dsh/dsh-etc/instances/<帐号>.env`，端口/域名）+ `systemctl --user enable --now dsh-web-45@<帐号>` + vhost 成稿 `simbest.conf` 的 `map $host` 加一行 + `systemctl reload nginx`；模板 unit 无需变动。
 
 ---
 

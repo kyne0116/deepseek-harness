@@ -1,7 +1,7 @@
 ================================================================
  nginx 1.30.5 + nginx_upstream_check_module 安装手册（跳板机版）
  适用机器：10.218.174.159 / 10.218.174.160 两台跳板机（配置相同，各自安装；对外 VIP 10.218.174.161）
- 安装位置：/home/uaip（源码 /home/uaip/nginx-1.30.5，编译产物 /home/uaip/nginx8088）
+ 安装位置：/home/mapp（源码 /home/mapp/nginx-1.30.5，编译产物 /home/mapp/nginx8088）
  适用系统：CentOS / RHEL / BCEuler-21.10
 ================================================================
 
@@ -16,8 +16,8 @@ yum install -y gcc make patch unzip pcre-devel zlib-devel openssl-devel
 二、编译安装
 ----------------------------------------------------------------
 # 1. 将 nginx-1.30.5.tar.gz 与 nginx_upstream_check_module-master.zip
-#    上传到服务器同一目录（示例 /home/uaip），解压：
-cd /home/uaip/nginx-1.30.5
+#    上传到服务器同一目录（示例 /home/mapp），解压：
+cd /home/mapp/nginx-1.30.5
 tar -xzf nginx-1.30.5.tar.gz
 unzip nginx_upstream_check_module-master.zip
 cd nginx-1.30.5
@@ -27,22 +27,22 @@ patch -p1 < ../nginx_upstream_check_module-master/check_1.30.4+.patch
 
 # 3. 编译配置（追加其他第三方模块时再加对应 --add-module）
 # 注意：保持单行执行，勿拆成多行（\ 续行符后混入空格会报 invalid option " "）
-./configure --prefix=/home/uaip/nginx8088 --with-http_ssl_module --with-http_stub_status_module --with-http_gzip_static_module --add-module=../nginx_upstream_check_module-master
+./configure --prefix=/home/mapp/nginx8088 --with-http_ssl_module --with-http_stub_status_module --with-http_gzip_static_module --add-module=../nginx_upstream_check_module-master
 
 # 4. 编译安装
 make -j$(nproc) && make install
 
 # 5. 创建运行目录（make install 不创建；run/ 存放 pid 文件，conf/vhosts/ 存放业务配置）
-mkdir -p /home/uaip/nginx8088/run /home/uaip/nginx8088/conf/vhosts
+mkdir -p /home/mapp/nginx8088/run /home/mapp/nginx8088/conf/vhosts
 
 # 6. 验证（输出应包含 nginx/1.30.5 及 --add-module 信息）
-/home/uaip/nginx8088/sbin/nginx -V
+/home/mapp/nginx8088/sbin/nginx -V
 
 三、配置文件布局
 ----------------------------------------------------------------
-# /home/uaip/nginx8088/conf/nginx.conf（详见nginx.conf文件） ==================
+# /home/mapp/nginx8088/conf/nginx.conf（详见nginx.conf文件） ==================
 
-# /home/uaip/nginx8088/conf/vhosts/simbest.conf（详见simbest.conf文件） ==================
+# /home/mapp/nginx8088/conf/vhosts/simbest.conf（详见simbest.conf文件） ==================
 
 
 四、systemd 服务
@@ -55,14 +55,14 @@ After=network.target
 
 [Service]
 Type=forking
-# nginx 装在 /home/uaip 下、仅监听 8088 非特权端口，以普通账号运行（按实际账号调整）
+# nginx 装在 /home/mapp 下、仅监听 8088 非特权端口，以普通账号运行（按实际账号调整）
 User=uaip
 Group=uaip
-PIDFile=/home/uaip/nginx8088/run/nginx.pid
-ExecStartPre=/home/uaip/nginx8088/sbin/nginx -t -c /home/uaip/nginx8088/conf/nginx.conf
-ExecStart=/home/uaip/nginx8088/sbin/nginx -c /home/uaip/nginx8088/conf/nginx.conf
-ExecReload=/home/uaip/nginx8088/sbin/nginx -c /home/uaip/nginx8088/conf/nginx.conf -s reload
-ExecStop=/home/uaip/nginx8088/sbin/nginx -c /home/uaip/nginx8088/conf/nginx.conf -s quit
+PIDFile=/home/mapp/nginx8088/run/nginx.pid
+ExecStartPre=/home/mapp/nginx8088/sbin/nginx -t -c /home/mapp/nginx8088/conf/nginx.conf
+ExecStart=/home/mapp/nginx8088/sbin/nginx -c /home/mapp/nginx8088/conf/nginx.conf
+ExecReload=/home/mapp/nginx8088/sbin/nginx -c /home/mapp/nginx8088/conf/nginx.conf -s reload
+ExecStop=/home/mapp/nginx8088/sbin/nginx -c /home/mapp/nginx8088/conf/nginx.conf -s quit
 Restart=on-failure
 PrivateTmp=true
 
@@ -75,8 +75,8 @@ systemctl enable --now nginx
 
 五、常用运维命令
 ----------------------------------------------------------------
-启动       /home/uaip/nginx8088/sbin/nginx
-检测配置   /home/uaip/nginx8088/sbin/nginx -t
-重新加载   /home/uaip/nginx8088/sbin/nginx -s reload
-优雅停止   /home/uaip/nginx8088/sbin/nginx -s quit
-快速停止   /home/uaip/nginx8088/sbin/nginx -s stop
+启动       /home/mapp/nginx8088/sbin/nginx
+检测配置   /home/mapp/nginx8088/sbin/nginx -t
+重新加载   /home/mapp/nginx8088/sbin/nginx -s reload
+优雅停止   /home/mapp/nginx8088/sbin/nginx -s quit
+快速停止   /home/mapp/nginx8088/sbin/nginx -s stop
