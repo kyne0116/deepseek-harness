@@ -10,3 +10,105 @@ index ac14980e953134f2285e326a5111cf52de717cf5..6b0c9d5b5063f447cb8aa3e0fc9d3427
      shared.setupProcessPkg(entrypoint2, manifest2.entrypoint);
      if (manifest2.debug) {
        shared.installDiagnostic(SNAPSHOT_PREFIX);
+diff --git a/prelude/sea-vfs-setup.js b/prelude/sea-vfs-setup.js
+index 94a34ea58dc14d7e39ebbd5aaf6351612ffd6891..63658bce71ab6d6c563776f6f65a8f896b7c9e68 100644
+--- a/prelude/sea-vfs-setup.js
++++ b/prelude/sea-vfs-setup.js
+@@ -295,12 +295,60 @@ function _makeStats(meta) {
+  *     cache.  Bypasses the MemoryProvider tree entirely.  Returns a Buffer
+  *     copy to prevent callers from corrupting the archive.
+  *
+- *   - readdirSync()         Returns manifest directory entries directly.
++ *   - readdirSync()         Returns manifest directory entries directly, or
++ *                           SEADirent instances when withFileTypes is set.
+  *
+  * The MemoryProvider base class directory tree is still populated at
+  * construction time as a safety net for edge-case super method fallbacks
+  * (e.g., readlinkSync).
+  */
++
++// Dirent emulation for readdir({ withFileTypes: true }).  Node offers no
++// public constructor for fs.Dirent, so mirror the shape consumers rely on —
++// the entry name plus the is*() predicates.  Type codes follow Node's
++// UV_DIRENT numbering (UNKNOWN 0, FILE 1, DIRECTORY 2, SYMLINK 3).
++var DIRENT_UNKNOWN = 0;
++var DIRENT_FILE = 1;
++var DIRENT_DIRECTORY = 2;
++var DIRENT_SYMLINK = 3;
++
++class SEADirent {
++  constructor(name, type, parentPath) {
++    this.name = name;
++    this.parentPath = parentPath;
++    this.path = parentPath;
++    this._type = type;
++  }
++
++  isFile() {
++    return this._type === DIRENT_FILE;
++  }
++
++  isDirectory() {
++    return this._type === DIRENT_DIRECTORY;
++  }
++
++  isSymbolicLink() {
++    return this._type === DIRENT_SYMLINK;
++  }
++
++  isBlockDevice() {
++    return false;
++  }
++
++  isCharacterDevice() {
++    return false;
++  }
++
++  isFIFO() {
++    return false;
++  }
++
++  isSocket() {
++    return false;
++  }
++}
++
+ class SEAProvider extends MemoryProvider {
+   constructor(seaManifest) {
+     super();
+@@ -475,12 +523,32 @@ class SEAProvider extends MemoryProvider {
+     return -2;
+   }
+ 
+-  readdirSync(dirPath) {
++  readdirSync(dirPath, options) {
+     perf.count('readdirSync calls');
+     var p = this._resolveSymlink(toManifestKey(dirPath));
+     var entries = this._manifest.directories[p];
+-    if (entries) return entries.slice();
+-    return super.readdirSync(p);
++    if (entries) {
++      // Honor withFileTypes: the fs.promises.readdir wrapper in
++      // @roberts_lando/vfs hands us the caller's options verbatim, and
++      // dropping them yields bare name strings where Dirent consumers
++      // (isDirectory() etc.) expect Dirent objects.
++      if (!options || !options.withFileTypes) return entries.slice();
++      var manifest = this._manifest;
++      return entries.map(function (name) {
++        var childPath = p === '/' ? '/' + name : p + '/' + name;
++        var meta = manifest.stats[childPath];
++        var type =
++          manifest.symlinks[childPath] !== undefined
++            ? DIRENT_SYMLINK
++            : meta && meta.isDirectory
++              ? DIRENT_DIRECTORY
++              : meta && meta.isFile
++                ? DIRENT_FILE
++                : DIRENT_UNKNOWN;
++        return new SEADirent(name, type, p);
++      });
++    }
++    return super.readdirSync(p, options);
+   }
+ 
+   existsSync(filePath) {
