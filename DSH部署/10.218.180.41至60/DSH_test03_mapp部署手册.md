@@ -194,6 +194,12 @@ DSH_HOME=/data/dsh/dsh-data/test03
 MOMA_API_KEY=<替换为网关 Bearer key>   # 内网凭据，注意保管
 ```
 
+> **LLM 未配置的报错特征**：对话报 `no API key for provider route "deepseek-official"` =
+> 会话走了内置默认路由 —— 检查两处：① 本文件 `MOMA_API_KEY` 已填真值（非占位符）；
+> ② `$DSH_HOME/settings.yaml` 已按 §1.5 成稿落位（定义 moma 提供方与默认模型，热加载）。
+> 两处齐备后新会话默认走 MoMA/Qwen3.8-27B；旧会话在会话内模型选择器手动切换一次。
+> 排障细节见《DSH_test03_mapp排障手册》§3 A 类。
+
 ---
 
 ## 5. nginx 接入（vhost 部署）
@@ -381,6 +387,55 @@ curl.exe -s -H "Host: test03.dsh.internal" http://10.218.174.161:8088/ngStatus
 token 为该实例的访问凭据，服务重启后以日志中最新打印为准）
 
 **加用户实例**：按名单表生成 env（`/data/dsh/dsh-etc/instances/<帐号>.env`，端口/域名）+ `systemctl --user enable --now dsh-web-45@<帐号>` + vhost 成稿 `simbest.conf` 的 `map $host` 加一行 + `systemctl reload nginx`；模板 unit 无需变动。
+
+### 8.1 runtime 升级/重装核对清单
+
+换新版本 wheel（或重装同版本）时按序执行，**每步做完核对预期再进下一步**：
+
+```bash
+# 1) 停实例（优雅停止；Restart=on-failure 不会自动拉起）
+systemctl --user stop dsh-web-45@test03
+ss -lntp | grep 7103 || echo "7103 已释放"
+
+# 2) 解压新 wheel（覆盖 runtime/）
+python3 -m zipfile -e /data/dsh/pkg/deepseek_harness_runtime_bin-<版本>-py3-none-manylinux_2_28_x86_64.whl /data/dsh/dshruntime/
+
+# 3) 可执行位修复（必做：zipfile 不保留权限位）
+python3 - <<'PY'
+import os, zipfile
+whl  = "/data/dsh/pkg/deepseek_harness_runtime_bin-<版本>-py3-none-manylinux_2_28_x86_64.whl"
+base = "/data/dsh/dshruntime"
+with zipfile.ZipFile(whl) as z:
+    for info in z.infolist():
+        mode = (info.external_attr >> 16) & 0o7777
+        if mode and os.path.isfile(os.path.join(base, info.filename)):
+            os.chmod(os.path.join(base, info.filename), mode)
+rt = os.path.join(base, "deepseek_harness_runtime", "runtime")
+if os.path.isdir(rt):
+    for root, dirs, files in os.walk(rt):
+        for name in files:
+            os.chmod(os.path.join(root, name), 0o755)
+print("exec bits fixed")
+PY
+
+# 4) 版本核验（预期打印目标版本）
+DSH_HOME=/data/dsh/dsh-data/test03 PYTHONPATH=/data/dsh/dshruntime \
+  python3 -c 'from deepseek_harness_runtime import main; main()' --version
+
+# 5) 启动 + 等 45 秒（引导加载全部插件，别只看 3 秒）
+systemctl --user start dsh-web-45@test03
+systemctl --user status dsh-web-45@test03 --no-pager | head -4
+tail -5 /data/dsh/dsh-logs/dsh-web-45-test03.log      # 预期：dsh web: http://127.0.0.1:7103/?token=... 且其后无报错
+```
+
+升级注意事项：
+
+- **token 必变**：重启后从日志抓最新 token 重新分发（§8 表内命令）。
+- **`profiles/node_modules` 代理桩自动重建**：新版本启动时按新闭包重写代理桩，
+  **勿手工修补旧桩**（手工改动会被自愈对账覆盖；staging 缺文件导致的桩缺件属构建侧问题，见构建指南 F 清单）。
+- **实例数据不受影响**：`$DSH_HOME`（会话/凭据/settings.yaml）与实例 env 均不在升级覆盖范围；
+  谨慎起见解压前可备份 `dshruntime/deepseek_harness_runtime/runtime`。
+- 解压中途失败（如 `Text file busy` = 停实例没做/没停干净）必须**从头完整重解压**，不可续传。
 
 ---
 

@@ -95,6 +95,22 @@ base bundle 挂载的 `session-title-llm` 行（`@deepseek-ai/dsh-session-title-
 桩清单不含 `dsh.client`，导致客户端插件扫描全部落空（boot 图为空）。扫描器现按
 `dsh.moduleFallback.targets` 跳回真实包继续扫描。**上游尚无此修复**，回馈上游见第 9 节。
 
+### 3.6 官方构建缺口总账（F1~F7，2026-09 跨两天实战实证）
+
+以下缺口全部在洁净/半成品构建树上实证复现，**共同结论：官方从真洁净状态构建 linux-x64 exe 的路径是坏的**，历史上能出产物依赖构建树里历代累积的残留产物。每项：现象 → 根因 → 规避（本仓库均已落地）→ 上游状态。
+
+| 编号 | 现象 | 根因 | 规避（本仓库落地方式） | 上游状态 |
+|---|---|---|---|---|
+| **F1** | 运行时报 `child.isDirectory is not a function`，会话创建必崩 | pkg SEA prelude 的 `SEAProvider.readdirSync(dirPath)` **丢弃 options 参数**，`withFileTypes` 调用拿到字符串数组；破损代码存在于 `sea-vfs-setup.js` 与 `sea-bootstrap.bundle.js`（SEA 实际注入件）两处 | `patches/@yao-pkg__pkg@6.21.0.patch` 双 hunk：补 `SEADirent` 类 + options 感知 readdirSync | @yao-pkg/pkg@6.21.0 未修复；官方发布验证（plain Node 驱动）结构性测不出 |
+| **F2** | tsdown 报 `Cannot resolve entry module lib/types/{index,invariant,startup}.js` | 根包 `@deepseek-ai/dsh-root` 无任何 TS 源码，这三个入口文件**在洁净树上无生产者**；且 brace-glob 形式在内嵌 globber 下解析不稳定 | `tsdown.config.ts` 改字面路径三件套 + 洁净树预先铺 `export {}` 占位 | 未修复；官方构建依赖非洁净残留 |
+| **F3** | 失败点随构建轮次漂移：host tsdown 消费 client tsc 产物（hmr 的 invariant 伴随）、并行 clean 竞态删他包/自身入口、`pnpm deploy` 后 lib 缺斤短两 | 构建编排存在**跨面隐式依赖**（host tsdown 依赖 client tsc 先产出）而无显式声明 | **必须按 §4.1 从头到尾一次跑完，禁止在半成品树上单独补跑某一步**；失败后永远从第一步重来 | 未修复；verify-packed-install 用 plain Node 驱动，测不出 exe/快照路径 |
+| **F4** | tsdown 报 `Cannot resolve entry module lib/types/index.js`（单发，恰在打包要用的包上） | 并行 clean 竞态：A 包构建的 clean 清掉 B 包刚产出的入口（入口文件位于各自 outDir 内部） | `tsdown --no-clean`（两 face 都加）；或失败后重跑（每次推进一些，2~3 轮收敛） | 未修复 |
+| **F5** | 全量 tsc 报成片 `Cannot find module 'zod' / '@xterm/headless' / 'clsx'`（一次性 100+ 个） | `pnpm install` 后 per-package node_modules 链接残缺 | 重跑 `pnpm install` 即愈；装完抽查 2~3 个关键链接再开工 | pnpm 11.7 + 本仓 supportedArchitectures 交互，未定位到最小复现 |
+| **F6** | 运行时报 `Cannot find module .../node-addon-system-linux-x64/bin/glibc/system.node` | `native/system/packages/linux-x64/bin/`（landlock-run、glibc/musl system.node）是构建产物不入库，Windows 交叉构建无来源 | 从 npm 发布包（同版本 0.1.2）提取 `bin/` 落回工作区包，deploy 自带 | 供给链缺失；landlock-run 无扩展名不匹配打包 ASSET_GLOBS，沙箱功能仍受限 |
+| **F7** | 浏览器 `Failed to load plugins — 22 entries did not activate — waiting for services: sessions` | client 面 tsdown 从未成功 → 全部包 `lib/client.js`（浏览器端服务模块）缺失；client 面 tsc 被 F5 类假错误挡住即全军覆没 | §4.1 全量流程（client tsc 报错必须解决，**不可跳过 client 面**）；`lib/client.js` 进快照是 UI 可用的硬前提 | client 面洁净健康度无 CI 保护 |
+
+> 与 §3.1~§3.5 的关系：§3 是 9/17 已知的**一次性准备**，F1~F7 是本次实证的**缺口总账**——其中 F1 的补丁与 F2 的字面入口已提交在 `fix/sea-pkg-readdir-dirent` 分支（4 个提交），回馈上游见第 9 节。
+
 ## 4. 标准构建流程
 
 ### 4.0 会话级环境变量（每次开终端都要）
@@ -121,6 +137,13 @@ DSH_BUILD_CLIENT_PROFILE=official pnpm exec tsx scripts/build-exe-for-python-sdk
 | `pnpm deploy` 闭包暂存 | 把闭包物化到 `python/sdk-runtime/src/deepseek_harness_runtime/runtime/node/` | 5~10 min |
 | pkg --sea 打包 | 下载基座（首次）/ 读缓存 → 生成 blob → 注入 exe | 5~10 min |
 | sidecar 与同步 | 拷 `-rg`，产物同步进 python runtime 目录 | 秒级 |
+
+> ⚠️ **F3 洁净/半成品树警告**：该流水线必须**从头到尾一次跑完**。在失败的半成品树上单独补跑某一步
+> （只重跑 tsdown、只重跑 deploy……），会因跨面产物缺失死在更深处，且死点每轮不同。
+> 失败后永远从本节第一步重来；伴随占位（`lib/types/{index,invariant,startup}.js`）缺失先按 F2 重铺。
+>
+> ⚠️ **F5 依赖完整性**：任何 `pnpm install` 之后，全量 tsc 若报成片 `Cannot find module`
+> （zod、@xterm/headless、clsx 等），是 per-package 链接残缺而非代码问题 —— 重跑 `pnpm install` 即愈。
 
 **成功标志**（结尾四行）：
 
@@ -232,10 +255,14 @@ curl -s -b /tmp/jar -D- -o /dev/null "http://127.0.0.1:7188/plugins/??@deepseek-
 | 7 | wheel 构建报 `runtime executable is not executable` / `lost its executable bit` | Windows fs 无 POSIX exec 位 | §3.3 已跳过检查 + §4.4 补 0o755 |
 | 8 | 后台构建"成功"（exit 0）实际失败 | `| tail` 管道吞退出码 | 去掉管道直跑，或看 `$PIPESTATUS` |
 | 9 | 页面报 `HTML did not preload @deepseek-ai/dsh-client-modules/client.js`、boot 图 rev=`240c4d8dcf0d` | exe 代理桩清单无 `dsh.client`，扫描全空（产品 bug，已修） | 保留 §3.5 修复；回归测试在 `packages/client/modules/tests/node-half.client.spec.ts` |
+| 10 | tsdown 报 `Cannot resolve entry module lib/types/invariant.js`（或 startup.js） | 伴随占位缺失：该入口无真实源码产出，洁净树/清理后不存在 | 重铺 `export {}` 占位三件套（§3.6 F2）；详见 F2/F3 |
+| 11 | tsdown 报 `Cannot resolve entry module lib/types/index.js`（单发，恰为打包要用的包） | 并行 clean 竞态清掉了刚产出的入口（F4） | `tsc -b tsconfig.host.json` 重产出后**立即**接打包，勿隔其他操作 |
+| 12 | pkg 阶段 `TypeError: fetch failed`（Refining file records 前后） | SEA 基座 Node 下载瞬断 | 直接重跑；`~/.pkg-cache` 有缓存后不再下载 |
+| 13 | 全量 tsc 报成片 `Cannot find module 'zod'/'@xterm/headless'/'clsx'`（100+ 个） | `pnpm install` 后 per-package 链接残缺（F5） | 重跑 `pnpm install`；愈后重跑 §4.1 |
 
 ## 8. 与部署侧的衔接
 
-- wheel 上服务器后按《DSH_test03_mapp部署手册》§3 的解压/权限位流程 + 《DSH_test03_升级修复client-modules_操作手册》替换重启。
+- wheel 上服务器后按《DSH_test03_mapp部署手册》§3 的解压/权限位流程 + §8.1 的升级核对清单替换重启。
 - **联调高发坑（非构建，但同链路）**：DSH 的 `/api` 信任门要求请求 `Origin` 与服务器收到的 `Host` 头**完全一致**（含端口）。全链路 nginx（跳板机 + DSH 机）必须 `proxy_set_header Host $http_host;`（`$host` 会剥端口 → `/api` 全 403 → 页面"自动重连中"），并建议 `proxy_buffering off` + `proxy_read_timeout 3600s` 保 SSE。成稿见 nginx 材料目录 `DSH配置/`、`159和160跳板机配置/` 下的 `simbest.conf`。
 
 ## 9. 附：本次仓库改动清单（便于拆分提交与回馈上游）
