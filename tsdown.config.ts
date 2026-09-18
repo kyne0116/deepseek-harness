@@ -19,7 +19,12 @@ export default defineConfig(({ env }) => {
     workspace: client
       ? ['vendor/*', 'packages/*/*', 'apps/cli']
       : ['vendor/*', 'packages/*/*', 'apps/cli', 'apps/desktop', 'apps/desktop-host'],
-    entry: client ? '' : ['lib/types/{index,invariant,startup}.js'],
+    entry: client
+      ? ''
+      // Literal paths, not a brace glob: glob resolution of this entry is
+      // environment-fragile (fails on clean trees where the files are only
+      // just materialized), and the three names are fixed anyway.
+      : ['lib/types/index.js', 'lib/types/invariant.js', 'lib/types/startup.js'],
     outDir: 'lib',
     format: ['esm'],
     platform: 'node',
