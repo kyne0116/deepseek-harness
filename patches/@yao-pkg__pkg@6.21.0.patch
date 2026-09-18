@@ -1,8 +1,76 @@
 diff --git a/prelude/sea-bootstrap.bundle.js b/prelude/sea-bootstrap.bundle.js
-index ac14980e953134f2285e326a5111cf52de717cf5..6b0c9d5b5063f447cb8aa3e0fc9d342729f29989 100644
+index ac14980e953134f2285e326a5111cf52de717cf5..ec05d7e5329fbcfeee428ad6e4531a534ebcbd93 100644
 --- a/prelude/sea-bootstrap.bundle.js
 +++ b/prelude/sea-bootstrap.bundle.js
-@@ -5560,7 +5560,6 @@ var require_sea_bootstrap_core = __commonJS({
+@@ -5356,6 +5356,42 @@ var require_sea_vfs_setup = __commonJS({
+         }
+       };
+     }
++    // Dirent emulation for readdir({ withFileTypes: true }).  Node offers no
++    // public constructor for fs.Dirent, so mirror the shape consumers rely on
++    // (name plus the is*() predicates), using Node's UV_DIRENT numbering.
++    var DIRENT_UNKNOWN = 0;
++    var DIRENT_FILE = 1;
++    var DIRENT_DIRECTORY = 2;
++    var DIRENT_SYMLINK = 3;
++    var SEADirent = class {
++      constructor(name, type, parentPath) {
++        this.name = name;
++        this.parentPath = parentPath;
++        this.path = parentPath;
++        this._type = type;
++      }
++      isFile() {
++        return this._type === DIRENT_FILE;
++      }
++      isDirectory() {
++        return this._type === DIRENT_DIRECTORY;
++      }
++      isSymbolicLink() {
++        return this._type === DIRENT_SYMLINK;
++      }
++      isBlockDevice() {
++        return false;
++      }
++      isCharacterDevice() {
++        return false;
++      }
++      isFIFO() {
++        return false;
++      }
++      isSocket() {
++        return false;
++      }
++    };
+     var SEAProvider = class extends MemoryProvider {
+       constructor(seaManifest) {
+         super();
+@@ -5465,12 +5501,21 @@ var require_sea_vfs_setup = __commonJS({
+         }
+         return -2;
+       }
+-      readdirSync(dirPath) {
++      readdirSync(dirPath, options) {
+         perf2.count("readdirSync calls");
+         var p = this._resolveSymlink(toManifestKey(dirPath));
+         var entries = this._manifest.directories[p];
+-        if (entries) return entries.slice();
+-        return super.readdirSync(p);
++        if (entries) {
++          if (!options || !options.withFileTypes) return entries.slice();
++          var manifest = this._manifest;
++          return entries.map(function(name) {
++            var childPath = p === "/" ? "/" + name : p + "/" + name;
++            var meta = manifest.stats[childPath];
++            var type = manifest.symlinks[childPath] !== void 0 ? DIRENT_SYMLINK : meta && meta.isDirectory ? DIRENT_DIRECTORY : meta && meta.isFile ? DIRENT_FILE : DIRENT_UNKNOWN;
++            return new SEADirent(name, type, p);
++          });
++        }
++        return super.readdirSync(p, options);
+       }
+       existsSync(filePath) {
+         perf2.count("existsSync calls");
+@@ -5560,7 +5605,6 @@ var require_sea_bootstrap_core = __commonJS({
      var insideSnapshot = vfs.insideSnapshot;
      var SNAPSHOT_PREFIX = vfs.SNAPSHOT_PREFIX;
      shared.patchDlopen(insideSnapshot);
