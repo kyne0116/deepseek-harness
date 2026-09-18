@@ -11,7 +11,7 @@ import { existsSync, statSync } from 'node:fs'
 import { chmod, copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
-import { resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons } from './build-exe-for-python-sdk-native-pty.ts'
+import { resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons, hasLinuxNodePtyPrebuild } from './build-exe-for-python-sdk-native-pty.ts'
 import { copyOfficeSidecar, OFFICE_ASSET_IGNORES } from './build-exe-for-python-sdk-office.ts'
 
 const root = resolve(import.meta.dirname, '..')
@@ -526,9 +526,13 @@ class SingleExeBuild {
       return
     }
     const host = Target.host()
-    if (target.platform !== host.platform || target.arch !== host.arch) {
+    const hostMatchesTarget = target.platform === host.platform && target.arch === host.arch
+    // A locally compiled addon must match its host; node-pty's target prebuild
+    // is built for its named target and cross-packages legitimately.
+    if (!hostMatchesTarget && !hasLinuxNodePtyPrebuild(packageDirectory, target.arch)) {
       throw new Error(
-        'build-exe-for-python-sdk: build the Linux runtime on its target architecture; '
+        'build-exe-for-python-sdk: build the Linux runtime on its target architecture '
+        + `or install node-pty's linux-${target.arch} prebuild; `
         + `target ${target.platform}-${target.arch} does not match host ${host.platform}-${host.arch}.`,
       )
     }

@@ -311,6 +311,11 @@ def verify_wheel(
             for runtime_file in runtime_payload:
                 if "/" in runtime_file.split("/runtime/", 1)[1]:
                     continue
+                # A Windows host cannot represent the POSIX exec bit, so it
+                # cannot record it into the wheel; deploy extracts re-apply
+                # the mode themselves.
+                if os.name != "posix":
+                    continue
                 mode = archive.getinfo(runtime_file).external_attr >> 16
                 if platform[0] != "win_amd64" and mode & stat.S_IXUSR == 0:
                     raise RuntimeError(f"{wheel} runtime executable lost its executable bit: {runtime_file}")

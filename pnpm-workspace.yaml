@@ -14,6 +14,22 @@ packages:
   # closure is what the exe bundles and what the Python runtime distributes.
   - python/sdk-runtime
 
+# Vendored framework packages keep their upstream semver ranges, while local
+# builds must resolve those matching names to this workspace's pinned sources.
+linkWorkspacePackages: true
+
+# The auto deps-status check spawns `pnpm install` inside hook/CI contexts
+# (lefthook pre-push) where it cannot purge modules non-interactively, and it
+# has pruned root devDependencies on this machine; run installs explicitly.
+verifyDepsBeforeRun: false
+
+# Materialize the linux-x64 optional platform packages (ripgrep sidecar and
+# friends) alongside the host's own, so a non-Linux machine can cross-package
+# the linux-x64 single-exe runtime with `--targets=node24-linux-x64`.
+supportedArchitectures:
+  os: [current, linux]
+  cpu: [current, x64]
+
 overrides:
   'extract-zip>yauzl': '3.4.0'
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'

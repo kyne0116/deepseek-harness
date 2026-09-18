@@ -47,3 +47,7 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+
+# Intranet rollout working materials: runtime logs carry live tokens; rar is a local archive.
+DSH部署/10.218.180.41至60/files/*.log
+DSH部署.rar

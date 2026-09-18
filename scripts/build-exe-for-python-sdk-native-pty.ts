@@ -23,6 +23,17 @@ export function resolveLinuxNodePtyAddon(
 }
 
 /**
+ * Whether node-pty's target prebuild is installed. A prebuild is a
+ * cross-platform artifact built for its named target, so it is the one input
+ * that lets a host package a different-platform Linux executable.
+ * @param packageDirectory - installed node-pty package directory.
+ * @param arch - Linux target architecture.
+ */
+export function hasLinuxNodePtyPrebuild(packageDirectory: string, arch: 'x64' | 'arm64'): boolean {
+  return existsSync(join(packageDirectory, 'prebuilds', `linux-${arch}`, 'pty.node'))
+}
+
+/**
  * Require both node-pty addons used by the Windows ConPTY backend.
  * @param packageDirectory - staged node-pty package directory.
  * @param arch - Windows target architecture.

@@ -107,6 +107,11 @@ class RuntimeBuildHook(BuildHookInterface):
                 continue
             if not executable.is_file():
                 raise RuntimeError(f"runtime executable is not a file: {executable}")
+            # The POSIX exec bit cannot be represented on Windows filesystems,
+            # so a Windows host cross-building a POSIX wheel cannot record it;
+            # deploy extracts re-apply the mode themselves.
+            if os.name != "posix":
+                continue
             if platform_tag != "win_amd64" and executable.stat().st_mode & stat.S_IXUSR == 0:
                 raise RuntimeError(f"runtime executable is not executable: {executable}")
         build_data["pure_python"] = False
