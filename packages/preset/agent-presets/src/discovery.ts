@@ -21,7 +21,7 @@
  * @module @deepseek-ai/dsh-agent-presets/discovery
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, type Dirent } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { isBuiltin } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -273,6 +273,27 @@ async function isFile(path: string): Promise<boolean> {
 }
 
 /**
+ * Whether a readdir entry names a directory. Dirent-shim-proof: some SEA
+ * packagers (pkg's virtual filesystem) drop `withFileTypes` and hand back
+ * bare name strings instead of Dirents, so fall back to a stat whenever the
+ * entry is not carrying a Dirent's own answer.
+ * @param dir - the directory the entry was listed from.
+ * @param entry - the readdir entry, a Dirent or a bare name.
+ * @returns true when the entry resolves to a directory.
+ */
+async function entryIsDirectory(dir: string, entry: Dirent | string): Promise<boolean> {
+  const name = typeof entry === 'string' ? entry : entry.name
+  if (typeof entry !== 'string' && typeof entry.isDirectory === 'function') return entry.isDirectory()
+  try {
+    return (await stat(join(dir, name))).isDirectory()
+  } catch {
+    // Same contract as the Dirent path: unreadable entries are not preset
+    // directories and are skipped rather than surfaced.
+    return false
+  }
+}
+
+/**
  * Scan one root for preset directories.
  *
  * An absent root yields no presets rather than throwing: the user root does
@@ -299,9 +320,10 @@ export async function scanRoot(root: PresetRoot, harnessBase: string): Promise<A
     throw new Error(`agent-presets: cannot read preset root ${dir}: ${String(error)}`, { cause: error })
   }
   const found: AgentPreset[] = []
-  for (const child of children) {
-    if (!child.isDirectory() || !PRESET_ID.test(child.name)) continue
-    const directory = join(dir, child.name)
+  for (const entry of children) {
+    const name = typeof entry === 'string' ? entry : entry.name
+    if (!await entryIsDirectory(dir, entry) || !PRESET_ID.test(name)) continue
+    const directory = join(dir, name)
     const path = join(directory, COMPOSITION_FILE)
     const broken = await isFile(path)
       ? await compositionProblem(path, harnessBase)
@@ -310,7 +332,7 @@ export async function scanRoot(root: PresetRoot, harnessBase: string): Promise<A
     // still mounts, it just shows its id.
     const metadata = await readPresetMetadata(directory)
     found.push({
-      id: child.name, trust: root.trust, path, ...metadata,
+      id: name, trust: root.trust, path, ...metadata,
       ...broken === undefined ? {} : { broken },
     })
   }
